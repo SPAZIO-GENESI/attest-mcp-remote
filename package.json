@@ -1,0 +1,21 @@
+{
+  "name": "attest-mcp-remote",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Remote MCP server (Streamable HTTP) for the Spazio Genesi digital-work attestation service. Zero install: add the URL as a connector. Hash-based by design: no file ever transits — agents compute the SHA-256 locally.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "smoke": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.17.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4.110.0"
+  }
+}

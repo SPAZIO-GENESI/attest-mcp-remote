@@ -1,0 +1,17 @@
+# attest-mcp-remote — remote MCP server for the Spazio Genesi attestation service.
+# Pure client of the public imgauth API: no imgauth changes, no zone routes
+# (workers.dev only), no secrets. Session state lives in a SQLite-backed
+# Durable Object (available on the Workers Free plan).
+
+name = "attest-mcp-remote"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[durable_objects]
+bindings = [{ name = "MCP_OBJECT", class_name = "AttestMcpAgent" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AttestMcpAgent"]
