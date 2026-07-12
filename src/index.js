@@ -15,9 +15,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
-const API_BASE = "https://imgauth.spaziogenesi.org";
+const DEFAULT_API_BASE = "https://imgauth.spaziogenesi.org";
 const SITE_BASE = "https://attestazione.spaziogenesi.org";
 const FETCH_TIMEOUT_MS = 15_000;
+
+// Configurable for local testing against a wrangler-dev imgauth
+// (env.IMGAUTH_BASE); production needs no var and uses the default —
+// same pattern as imgauth's ALLOWED_ORIGIN. Set at both entry points
+// (worker fetch and Durable Object init), since they may run in
+// different isolates.
+let activeApiBase = DEFAULT_API_BASE;
 
 const SHA256_RE = /^[A-Fa-f0-9]{64}$/;
 
@@ -53,7 +60,7 @@ function badHashError() {
 }
 
 async function apiFetch(path, init = {}) {
-  return fetch(API_BASE + path, {
+  return fetch(activeApiBase + path, {
     ...init,
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
@@ -82,11 +89,15 @@ function upstreamError(res, what) {
 function certificateLinks(hash) {
   return [
     `- Public certificate page: ${SITE_BASE}/c/${hash}`,
-    `- Certificate PDF: ${API_BASE}/api/cert?hash=${hash}`,
-    `- OpenTimestamps proof (.ots): ${API_BASE}/api/ots?hash=${hash}`,
+    `- Certificate PDF: ${activeApiBase}/api/cert?hash=${hash}`,
+    `- OpenTimestamps proof (.ots): ${activeApiBase}/api/ots?hash=${hash}`,
     `- Verify with the file in the browser: ${SITE_BASE}?hash=${hash}`,
   ].join("\n");
 }
+
+// Bearer credential shape issued by the service (API key sg_k_… or
+// device-flow session token sg_s_…). Mirrors imgauth's BEARER_RE.
+const CREDENTIAL_RE = /^sg_(k|s)_[0-9a-f]{8,32}_[A-Za-z0-9_-]{16,64}$/;
 
 export class AttestMcpAgent extends McpAgent {
   server = new McpServer({
@@ -94,11 +105,38 @@ export class AttestMcpAgent extends McpAgent {
     version: "1.0.0",
   });
 
-  // Session state (Durable Object). The device-flow session token will live
-  // here in a later phase; kept empty for now.
-  initialState = {};
+  // Session state (Durable Object storage, scoped to this MCP session):
+  // - pendingAuth: device-flow request awaiting user approval
+  // - token: claimed session token (sg_s_…, 24h TTL). NEVER logged, never
+  //   echoed in tool results after the claim.
+  // - lastAttestation: the /api/hash response, kept so
+  //   create_certificate_pdf can be called with just the fingerprint.
+  initialState = { pendingAuth: null, token: null, lastAttestation: null };
+
+  // Credential resolution order: explicit Authorization header on the /mcp
+  // request (power users, e.g. Claude Code --header) wins over the
+  // device-flow session token.
+  resolveCredential() {
+    const headerBearer = this.props?.bearer;
+    if (headerBearer) return headerBearer;
+    const t = this.state.token;
+    if (t && Date.now() < t.expiresAt) return t.value;
+    return null;
+  }
+
+  noCredentialError() {
+    return toolError(
+      [
+        "No valid credential for attestation. Two options:",
+        "1. Device flow (no configuration): call the `authorize` tool, have the user open the link and approve, then call `complete_authorization`.",
+        "2. API key: connect with an `Authorization: Bearer sg_k_…` header (e.g. Claude Code: `claude mcp add --transport http … --header \"Authorization: Bearer sg_k_…\"`). Keys: https://imgauth.spaziogenesi.org/developer/keys",
+        "Verification tools need no credential.",
+      ].join("\n")
+    );
+  }
 
   async init() {
+    activeApiBase = this.env?.IMGAUTH_BASE || DEFAULT_API_BASE;
     this.server.registerTool(
       "service_status",
       {
@@ -153,7 +191,7 @@ export class AttestMcpAgent extends McpAgent {
             [
               `An OpenTimestamps proof EXISTS for ${hash}.`,
               "",
-              `- Download the proof: ${API_BASE}/api/ots?hash=${hash}`,
+              `- Download the proof: ${activeApiBase}/api/ots?hash=${hash}`,
               "- The proof may still be 'pending' if the attestation is recent; it matures with Bitcoin confirmation within a few hours.",
               "- Anyone can verify or upgrade it independently at https://opentimestamps.org or with the `ots` client.",
             ].join("\n")
@@ -279,11 +317,257 @@ export class AttestMcpAgent extends McpAgent {
         return upstreamError(res, "GET /c/<hash>");
       }
     );
+
+    // ── Credentialed tools (device flow → attest → certificate) ────────────
+
+    this.server.registerTool(
+      "authorize",
+      {
+        description:
+          "Start the device-flow authorization to attest works in this session (up to 20 attestations, 24h). " +
+          "Returns a link the USER must open in a browser and approve (anti-bot check included). " +
+          "After the user approves, call `complete_authorization`. " +
+          "Not needed if the connection already carries an API key header, or for verification tools.",
+        inputSchema: {},
+      },
+      async () => {
+        if (this.resolveCredential()) {
+          return text("A valid credential is already available in this session — you can call attest_hash directly.");
+        }
+        let res;
+        try {
+          res = await apiFetch("/api/agent/authorize", { method: "POST" });
+        } catch {
+          return toolError("Could not reach the attestation service (network error or timeout).");
+        }
+        if (!res.ok) return upstreamError(res, "POST /api/agent/authorize");
+        const a = await res.json();
+        this.setState({
+          ...this.state,
+          pendingAuth: {
+            code: a.code,
+            interval: Number(a.interval) || 3,
+            expiresAt: Date.now() + (Number(a.expires_in) || 600) * 1000,
+          },
+        });
+        return text(
+          [
+            "Authorization started. Show this link to the USER and ask them to open it in a browser and approve:",
+            "",
+            a.verification_url,
+            "",
+            `The request expires in ${Math.floor((Number(a.expires_in) || 600) / 60)} minutes.`,
+            "Once the user says they approved, call `complete_authorization`.",
+          ].join("\n")
+        );
+      }
+    );
+
+    this.server.registerTool(
+      "complete_authorization",
+      {
+        description:
+          "Complete the device-flow authorization after the user approved in the browser. " +
+          "Polls the service briefly; if approval hasn't happened yet, just call this tool again.",
+        inputSchema: {},
+      },
+      async () => {
+        const pa = this.state.pendingAuth;
+        if (!pa) return toolError("No authorization in progress. Call `authorize` first.");
+        if (Date.now() > pa.expiresAt) {
+          this.setState({ ...this.state, pendingAuth: null });
+          return toolError("The authorization request expired. Call `authorize` again to start over.");
+        }
+        const intervalMs = Math.max(1, pa.interval) * 1000;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, intervalMs));
+          let res;
+          try {
+            res = await apiFetch(`/api/agent/token?code=${pa.code}`);
+          } catch {
+            return toolError("Could not reach the attestation service (network error or timeout). Call this tool again.");
+          }
+          if (res.status === 410) {
+            await drop(res);
+            this.setState({ ...this.state, pendingAuth: null });
+            return toolError("The authorization request expired. Call `authorize` again to start over.");
+          }
+          if (!res.ok) return upstreamError(res, "GET /api/agent/token");
+          const t = await res.json();
+          if (t.status === "pending") continue;
+          if (t.status === "approved" && t.token) {
+            // Claimed exactly once. Conservative local expiry: the real TTL
+            // is 24h from approval; 23h avoids using a token about to die.
+            this.setState({
+              ...this.state,
+              pendingAuth: null,
+              token: { value: t.token, expiresAt: Date.now() + 23 * 60 * 60 * 1000 },
+            });
+            return text(
+              "Authorization complete. This session can now attest (up to 20 attestations, 24h). Call `attest_hash` with the work's SHA-256."
+            );
+          }
+          if (t.status === "claimed") {
+            this.setState({ ...this.state, pendingAuth: null });
+            return toolError(
+              "This authorization was already claimed (possibly by another session) and can't be reused. Call `authorize` again."
+            );
+          }
+        }
+        return text(
+          "Not approved yet. Ask the user to open the authorization link and approve, then call `complete_authorization` again."
+        );
+      }
+    );
+
+    this.server.registerTool(
+      "attest_hash",
+      {
+        description:
+          "Attest a work: the service binds the SHA-256 fingerprint to a server-side timestamp and signs it (HMAC). " +
+          "Requires a credential (device flow via `authorize`, or an API key header). " +
+          "Optional declared metadata (title/author/year/notes) are normalized and BOUND by the signature — immutable after issuance, " +
+          "but they remain self-declared (they don't prove authorship). " +
+          HASH_HOWTO,
+        inputSchema: {
+          sha256: sha256Param,
+          name: z.string().optional().describe("File name (descriptive only, shown on the certificate)."),
+          size: z.number().int().positive().optional().describe("File size in bytes (descriptive only)."),
+          type: z.string().optional().describe("MIME type (descriptive only)."),
+          titolo: z.string().optional().describe("Declared title of the work (bound by the signature)."),
+          autore: z.string().optional().describe("Declared author (bound by the signature)."),
+          anno: z.string().optional().describe("Declared year/version (bound by the signature)."),
+          note: z.string().optional().describe("Declared notes (bound by the signature)."),
+        },
+      },
+      async ({ sha256, name, size, type, titolo, autore, anno, note }) => {
+        const hash = normalizeHash(sha256);
+        if (!hash) return badHashError();
+        const credential = this.resolveCredential();
+        if (!credential) return this.noCredentialError();
+
+        const payload = { sha256: hash };
+        if (name) payload.name = name;
+        if (size) payload.size = size;
+        if (type) payload.type = type;
+        if (titolo) payload.titolo = titolo;
+        if (autore) payload.autore = autore;
+        if (anno) payload.anno = anno;
+        if (note) payload.note = note;
+
+        let res;
+        try {
+          res = await apiFetch("/api/hash", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${credential}`,
+            },
+            body: JSON.stringify(payload),
+          });
+        } catch {
+          return toolError("Could not reach the attestation service (network error or timeout).");
+        }
+        if (res.status === 403) {
+          await drop(res);
+          // A session token that stopped working is dead (revoked/expired):
+          // drop it so the next attempt asks to authorize again.
+          if (!this.props?.bearer && this.state.token) {
+            this.setState({ ...this.state, token: null });
+          }
+          return toolError("Credential rejected (invalid, revoked or expired). Run `authorize` again, or check the API key in the connection header.");
+        }
+        if (res.status === 429) {
+          await drop(res);
+          return toolError(
+            "Rejected: either the credential's attestation quota is exhausted, or the service is rate-limiting. If you just authorized, the quota (20 per session) may be used up — otherwise wait a minute and retry once."
+          );
+        }
+        if (!res.ok) return upstreamError(res, "POST /api/hash");
+        const att = await res.json();
+        this.setState({ ...this.state, lastAttestation: att });
+        return text(
+          [
+            `Attested. The service bound fingerprint ${att.sha256} to its server timestamp:`,
+            `- attestazione: ${att.attestazione}`,
+            `- timestamp: ${att.timestamp_iso}`,
+            `- hmac (server signature): ${att.hmac}`,
+            att.titolo || att.autore || att.anno || att.note
+              ? `- declared metadata bound by the signature: ${["titolo", "autore", "anno", "note"].filter((k) => att[k]).map((k) => `${k}="${att[k]}"`).join(", ")}`
+              : null,
+            "",
+            "IMPORTANT: report these values to the user (they are the proof). Then call `create_certificate_pdf` with the same sha256 to generate and archive the certificate PDF (adds Bitcoin anchoring and permanent links).",
+          ]
+            .filter((l) => l !== null)
+            .join("\n")
+        );
+      }
+    );
+
+    this.server.registerTool(
+      "create_certificate_pdf",
+      {
+        description:
+          "Generate and archive the certificate PDF for a fingerprint attested in this session with `attest_hash`. " +
+          "The PDF is cryptographically signed, anchored in Bitcoin (OpenTimestamps) and archived server-side; " +
+          "this tool returns the permanent links (the PDF itself is downloadable from its URL — it is never inlined here).",
+        inputSchema: { sha256: sha256Param },
+      },
+      async ({ sha256 }) => {
+        const hash = normalizeHash(sha256);
+        if (!hash) return badHashError();
+        const att = this.state.lastAttestation;
+        if (!att || att.sha256 !== hash) {
+          return toolError(
+            "No attestation for this fingerprint in this session. Call `attest_hash` first (the certificate needs the signed attestation it returns)."
+          );
+        }
+        let res;
+        try {
+          res = await apiFetch("/api/cert-pdf", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(att),
+            // PDF generation + signing + anchoring can be slow: generous timeout.
+            signal: AbortSignal.timeout(60_000),
+          });
+        } catch {
+          return toolError("Could not reach the attestation service (network error or timeout) while generating the PDF.");
+        }
+        await drop(res);
+        if (res.status === 429) {
+          return toolError("The certificate endpoint is rate-limited right now. Wait a minute, then call this tool again.");
+        }
+        if (res.status === 400 || res.status === 403) {
+          return toolError("The service refused the attestation token (tampered or inconsistent values). Re-run `attest_hash` and try again.");
+        }
+        if (res.status === 503) {
+          return toolError("Certificate issuance is currently unavailable server-side (signing not configured). Check service_status.");
+        }
+        if (!res.ok) return upstreamError(res, "POST /api/cert-pdf");
+        return text(
+          [
+            `Certificate generated and archived for ${hash}. Permanent links to give the user:`,
+            "",
+            certificateLinks(hash),
+            "",
+            "The Bitcoin anchoring proof starts as 'pending' and matures within a few hours.",
+          ].join("\n")
+        );
+      }
+    );
   }
 }
 
 export default {
   fetch(request, env, ctx) {
+    activeApiBase = env?.IMGAUTH_BASE || DEFAULT_API_BASE;
+    // Header pass-through (power users): a Bearer sg_k_…/sg_s_… on the /mcp
+    // request is exposed to the agent as this.props.bearer. Malformed values
+    // are dropped here so the credential never reaches imgauth (nor logs).
+    const auth = request.headers.get("authorization") || "";
+    const bearer = auth.replace(/^Bearer\s+/i, "").trim();
+    ctx.props = { bearer: CREDENTIAL_RE.test(bearer) ? bearer : null };
     const url = new URL(request.url);
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(

@@ -93,9 +93,18 @@ await rpc("notifications/initialized", {}, { notification: true });
 const list = await rpc("tools/list", {});
 const toolNames = (list.result?.tools ?? []).map((t) => t.name).sort();
 check(
-  "tools/list has the 4 public tools",
+  "tools/list has the 8 tools (4 public + 4 credentialed)",
   JSON.stringify(toolNames) ===
-    JSON.stringify(["check_anchor", "lookup_certificate", "service_status", "verify_attestation"]),
+    JSON.stringify([
+      "attest_hash",
+      "authorize",
+      "check_anchor",
+      "complete_authorization",
+      "create_certificate_pdf",
+      "lookup_certificate",
+      "service_status",
+      "verify_attestation",
+    ]),
   toolNames.join(",")
 );
 
