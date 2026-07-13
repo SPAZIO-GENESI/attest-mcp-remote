@@ -16,10 +16,10 @@ hashing, full privacy) or the Telegram bot @SGAttestBot.
 
 ## Status
 
-Work in progress (phase 2 of
-[P26](https://github.com/SPAZIO-GENESI)): all 8 tools implemented and tested
-locally (device flow validated end-to-end against an isolated imgauth
-instance). Production deployment is the next phase.
+**In production.** Live at `https://attest-mcp-remote.it-e3f.workers.dev/mcp`.
+All 8 tools implemented, tested, and validated end-to-end against production,
+including a real zero-install run from claude.ai (connector by URL, human
+Turnstile approval, certificate PDF issued and archived).
 
 ## Tools
 
