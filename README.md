@@ -1,5 +1,8 @@
 # attest-mcp-remote
 
+Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/) as
+`io.github.SPAZIO-GENESI/attest-mcp-remote`.
+
 Remote MCP server (Streamable HTTP) for the [Spazio Genesi digital-work
 attestation service](https://attestazione.spaziogenesi.org). **Zero install**:
 add the URL as a connector in your MCP client and start verifying and

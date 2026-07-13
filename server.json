@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.SPAZIO-GENESI/attest-mcp-remote",
+  "description": "Zero-install remote MCP server for proof-of-existence file attestation.",
+  "repository": {
+    "url": "https://github.com/SPAZIO-GENESI/attest-mcp-remote",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "websiteUrl": "https://attestazione.spaziogenesi.org",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://attest-mcp-remote.it-e3f.workers.dev/mcp"
+    }
+  ]
+}
