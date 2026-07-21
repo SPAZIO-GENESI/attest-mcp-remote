@@ -57,6 +57,13 @@ harness**: it needs an isolated imgauth `wrangler dev` (own `--persist-to`
 state, `SIGNER_URL` emptied) because the user-approval step is simulated by
 writing the local D1 directly — see the header comment in the file.
 
+## Security
+
+Report vulnerabilities → [`/sicurezza/`](https://attestazione.spaziogenesi.org/sicurezza/)
+(responsible disclosure policy, safe harbor for good-faith research) — this
+repo has no `security.txt` of its own (Worker with no static assets), but
+the policy covers the whole project, including this workers.dev service.
+
 ## License
 
 MIT — © Spazio Genesi ETS. This is a pure client of the public
