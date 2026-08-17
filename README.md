@@ -57,6 +57,20 @@ harness**: it needs an isolated imgauth `wrangler dev` (own `--persist-to`
 state, `SIGNER_URL` emptied) because the user-approval step is simulated by
 writing the local D1 directly — see the header comment in the file.
 
+## ⚠️ When bumping the version
+
+This server is also advertised through an **MCP Server Card** published by the
+web interface, which repeats this server's name, version and endpoint:
+
+    https://attestazione.spaziogenesi.org/.well-known/mcp/server-card.json
+    → file: imgauthweb/.well-known/mcp/server-card.json
+
+That file is **not generated** from this repository, so a version bump here
+silently makes it wrong. When you change `version` in `package.json` and
+`server.json`, update `serverInfo.version` in the card too — same release, same
+day. (Publishing a card that misstates the version is the same class of problem
+as an `openapi.json` left behind: a descriptor that lies is worse than none.)
+
 ## Security
 
 Report vulnerabilities → [`/sicurezza/`](https://attestazione.spaziogenesi.org/sicurezza/)
